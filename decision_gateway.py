@@ -304,41 +304,48 @@ class RequestSource:
 
     # ------------------------------------------------------------------ #
     async def _from_jsonl(self):
-        """Replay the local JSONL file written by the producer."""
-        logger.info("Reading request stream from %s", STREAM_FILE)
-        with open(STREAM_FILE, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    yield json.loads(line)
-                    await asyncio.sleep(0.01)
+        """Replay the local JSONL file in a continuous loop at a
+        human-visible pace (~5 dispatches / second)."""
+        logger.info("Reading request stream from %s (looping)", STREAM_FILE)
+        while True:
+            with open(STREAM_FILE, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        yield json.loads(line)
+                        await asyncio.sleep(0.2)
+            logger.info("JSONL exhausted — rewinding for continuous demo")
+            await asyncio.sleep(1.0)
 
     # ------------------------------------------------------------------ #
     async def _generate_internal(self):
-        """Generate demand on-the-fly when no external source exists."""
-        logger.info("No external source — generating demand internally")
+        """Generate demand on-the-fly in a continuous loop."""
+        logger.info("No external source — generating demand internally (looping)")
         assert self._pipeline is not None
         dm = self._pipeline.demand.values
         hexes = self._pipeline.h3_mapping.active_hexes
         counter = 0
-        sim_start = datetime.now(tz=timezone.utc)
 
-        for t in range(min(50, dm.shape[0])):
-            for hex_idx, hex_id in enumerate(hexes):
-                for _ in range(int(dm[t, hex_idx])):
-                    counter += 1
-                    lat, lng = h3.cell_to_latlng(hex_id)
-                    yield {
-                        "request_id": f"REQ-{counter:06d}",
-                        "timestamp": (
-                            sim_start + timedelta(minutes=t * 5)
-                        ).isoformat(),
-                        "h3_hex": hex_id,
-                        "lat": round(lat, 6),
-                        "lng": round(lng, 6),
-                        "time_step": t,
-                    }
-            await asyncio.sleep(0.3)
+        while True:
+            sim_start = datetime.now(tz=timezone.utc)
+            for t in range(dm.shape[0]):
+                for hex_idx, hex_id in enumerate(hexes):
+                    for _ in range(int(dm[t, hex_idx])):
+                        counter += 1
+                        lat, lng = h3.cell_to_latlng(hex_id)
+                        yield {
+                            "request_id": f"REQ-{counter:06d}",
+                            "timestamp": (
+                                sim_start + timedelta(minutes=t * 5)
+                            ).isoformat(),
+                            "h3_hex": hex_id,
+                            "lat": round(lat, 6),
+                            "lng": round(lng, 6),
+                            "time_step": t,
+                        }
+                        await asyncio.sleep(0.2)
+            logger.info("24-h cycle complete — restarting")
+            await asyncio.sleep(1.0)
 
 
 # ========================================================================== #

@@ -588,11 +588,19 @@ def train(
     num_taxis: int = 20,
     num_workers: int = 2,
     checkpoint_freq: int = 10,
-    checkpoint_dir: str = "checkpoints",
+    checkpoint_dir: str = "checkpoints_ours",
+    density_alpha: float = 0.5,
 ) -> None:
     """Initialise Ray, build the PPO algorithm, and run the training loop.
 
-    Prints a per-iteration summary and saves periodic checkpoints.
+    Parameters
+    ----------
+    density_alpha : float
+        Weight of the density penalty in the reward.  Set to ``0.0``
+        for the ablation baseline (standard PPO without anti-bunching).
+    checkpoint_dir : str
+        Directory for saving checkpoints.  ``"checkpoints_ours"`` for
+        the full model, ``"checkpoints_ablation"`` for the ablation.
     """
     # ── Register custom env + model ───────────────────────────────────
     register_env(ENV_NAME, lambda cfg: TaxiDispatchMultiAgentEnv(cfg))
@@ -608,7 +616,7 @@ def train(
             "place": "Downtown Core, Singapore",
             "h3_resolution": 8,
             "demand_seed": 42,
-            "density_alpha": 0.5,
+            "density_alpha": density_alpha,
         },
     )
 
@@ -624,12 +632,14 @@ def train(
     ckpt_path = Path(checkpoint_dir)
     ckpt_path.mkdir(parents=True, exist_ok=True)
 
+    mode = "ABLATION (α=0)" if density_alpha == 0.0 else f"FULL MODEL (α={density_alpha})"
     print("\n" + "=" * 72)
-    print("  TRAINING  —  PPO + CTDE Parameter Sharing")
+    print(f"  TRAINING  —  PPO + CTDE Parameter Sharing  [{mode}]")
     print("=" * 72)
     print(f"  Taxis         : {num_taxis}")
     print(f"  Workers       : {num_workers}")
     print(f"  Iterations    : {iterations}")
+    print(f"  Density α     : {density_alpha}")
     print(f"  Checkpoint dir: {ckpt_path.resolve()}")
     print("=" * 72 + "\n")
 
@@ -689,6 +699,10 @@ def parse_args() -> argparse.Namespace:
         "--smoke-test", action="store_true",
         help="Quick 3-iteration test to verify the full pipeline",
     )
+    p.add_argument(
+        "--ablation", action="store_true",
+        help="Ablation mode: set density_alpha=0 and save to checkpoints_ablation",
+    )
     return p.parse_args()
 
 
@@ -706,12 +720,23 @@ if __name__ == "__main__":
         logging_level=logging.WARNING,
     )
 
+    if args.ablation:
+        density_alpha = 0.0
+        checkpoint_dir = "checkpoints_ablation"
+        logger.info("ABLATION mode: density_alpha=0.0, saving to %s", checkpoint_dir)
+    else:
+        density_alpha = 0.5
+        checkpoint_dir = "checkpoints_ours"
+        logger.info("FULL MODEL mode: density_alpha=0.5, saving to %s", checkpoint_dir)
+
     try:
         train(
             iterations=args.iterations,
             num_taxis=args.num_taxis,
             num_workers=args.num_workers,
             checkpoint_freq=args.checkpoint_freq,
+            checkpoint_dir=checkpoint_dir,
+            density_alpha=density_alpha,
         )
     finally:
         ray.shutdown()

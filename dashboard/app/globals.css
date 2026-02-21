@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0f;
+  color: #e4e4e7;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* deck.gl tooltip */
+.deck-tooltip {
+  font-family: "JetBrains Mono", monospace !important;
+  font-size: 11px !important;
+  background: rgba(10, 10, 15, 0.92) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 8px !important;
+  padding: 8px 12px !important;
+  color: #e4e4e7 !important;
+  white-space: pre-line !important;
+  backdrop-filter: blur(8px);
+}
+
+/* Custom scrollbar for terminal */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}

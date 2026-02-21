@@ -9,3 +9,5 @@ gymnasium>=1.0.0
 torch>=2.0.0
 kafka-python-ng>=2.2.0
 websockets>=13.0
+matplotlib>=3.8.0
+seaborn>=0.13.0

@@ -151,18 +151,46 @@ class SpatialDiscretiser:
 # ========================================================================== #
 @dataclass
 class DemandConfig:
-    """Hyper-parameters for the Poisson demand generator."""
+    """Hyper-parameters for the Poisson demand generator.
+
+    Tidal parameters
+    ----------------
+    The time-varying multiplier is a sum of Gaussian peaks on top of a
+    low overnight baseline, producing a realistic bi-modal rush-hour
+    profile over 288 five-minute steps (= 24 h)::
+
+        m(t) = overnight_base
+             + am_peak · exp(−(t − am_centre)² / 2σ²)
+             + pm_peak · exp(−(t − pm_centre)² / 2σ²)
+             + midday  · exp(−(t − midday_ctr)² / 2σ_mid²)
+    """
 
     hotspot_fraction: float = 0.20
     lambda_hotspot: float = 10.0
     lambda_normal: float = 2.0
     seed: Optional[int] = 42
 
+    overnight_base: float = 0.15
+    am_peak: float = 2.8
+    am_centre: float = 96.0         # step 96 ≈ 08:00
+    pm_peak: float = 2.3
+    pm_centre: float = 216.0        # step 216 ≈ 18:00
+    midday_boost: float = 0.7
+    midday_centre: float = 156.0    # step 156 ≈ 13:00
+    peak_sigma: float = 22.0        # ~1.8 h half-width for rush hours
+    midday_sigma: float = 36.0      # broader midday plateau
+
 
 class DemandGenerator:
     """Generates a synthetic ride-request demand matrix using Poisson
-    arrivals.  20 % of hexagons are randomly designated as *hotspots*
-    (e.g. CBD) with a higher arrival rate."""
+    arrivals with **tidal (time-varying)** rates.
+
+    20 % of hexagons are randomly designated as *hotspots* (e.g. CBD)
+    with a higher base arrival rate.  The base λ for every hex is then
+    scaled by a bi-modal tidal multiplier that peaks around 08:00 AM
+    and 18:00 PM, dips overnight, and has a moderate midday plateau —
+    faithfully modelling non-stationary urban taxi demand.
+    """
 
     def __init__(self, config: DemandConfig | None = None) -> None:
         self.cfg = config or DemandConfig()
@@ -178,7 +206,7 @@ class DemandGenerator:
         hotspots = shuffled[:n_hot]
         normals = shuffled[n_hot:]
         logger.info(
-            "Hotspots: %d hexagons (λ=%.1f) | Normal: %d hexagons (λ=%.1f)",
+            "Hotspots: %d hexagons (λ_base=%.1f) | Normal: %d hexagons (λ_base=%.1f)",
             len(hotspots),
             self.cfg.lambda_hotspot,
             len(normals),
@@ -187,16 +215,47 @@ class DemandGenerator:
         return hotspots, normals
 
     # ------------------------------------------------------------------ #
+    def tidal_multiplier(self, time_steps: int = 288) -> np.ndarray:
+        """Compute a ``(T,)`` tidal scaling curve over one day.
+
+        The curve combines:
+        * A low overnight baseline (``overnight_base``).
+        * An AM Gaussian peak centred at ``am_centre``.
+        * A PM Gaussian peak centred at ``pm_centre``.
+        * A gentle midday plateau centred at ``midday_centre``.
+
+        Returns
+        -------
+        np.ndarray, shape ``(time_steps,)``
+            Multiplier ∈ [overnight_base, ~am_peak + midday_boost + base].
+        """
+        c = self.cfg
+        t = np.arange(time_steps, dtype=np.float64)
+
+        def _gauss(centre: float, sigma: float) -> np.ndarray:
+            return np.exp(-0.5 * ((t - centre) / sigma) ** 2)
+
+        curve = (
+            c.overnight_base
+            + c.am_peak * _gauss(c.am_centre, c.peak_sigma)
+            + c.pm_peak * _gauss(c.pm_centre, c.peak_sigma)
+            + c.midday_boost * _gauss(c.midday_centre, c.midday_sigma)
+        )
+        return curve
+
+    # ------------------------------------------------------------------ #
     def generate_poisson_demand(
         self,
         h3_hexes: List[str],
         time_steps: int = 288,
     ) -> pd.DataFrame:
-        """Build a (time_steps × num_hexes) demand matrix.
+        """Build a ``(time_steps × num_hexes)`` demand matrix with
+        **tidal (time-varying)** Poisson rates.
 
-        Each cell is an independent Poisson draw representing the number
-        of ride requests originating from that hexagon during a
-        5-minute interval.
+        For each time step *t* and hex *h*::
+
+            λ(t, h) = λ_base(h) × tidal_multiplier(t)
+            demand(t, h) ~ Poisson(λ(t, h))
 
         Parameters
         ----------
@@ -214,28 +273,34 @@ class DemandGenerator:
         hotspots, normals = self._designate_hotspots(h3_hexes)
         hotspot_set = set(hotspots)
 
-        lambdas = np.array(
+        base_lambdas = np.array(
             [
                 self.cfg.lambda_hotspot if h in hotspot_set
                 else self.cfg.lambda_normal
                 for h in h3_hexes
-            ]
+            ],
+            dtype=np.float64,
         )
 
-        demand_matrix = self._rng.poisson(
-            lam=lambdas[np.newaxis, :],
-            size=(time_steps, len(h3_hexes)),
-        )
+        tide = self.tidal_multiplier(time_steps)  # (T,)
+
+        # λ(t, h) = base_lambda(h) × tide(t) → shape (T, H)
+        lambda_matrix = tide[:, np.newaxis] * base_lambdas[np.newaxis, :]
+
+        demand_matrix = self._rng.poisson(lam=lambda_matrix)
 
         df = pd.DataFrame(demand_matrix, columns=h3_hexes)
         df.index.name = "time_step"
 
         total = int(demand_matrix.sum())
+        peak_lambda = float(lambda_matrix.max())
         logger.info(
-            "Demand matrix: %d time-steps × %d hexes → %d total requests",
+            "Demand matrix: %d time-steps × %d hexes → %d total requests "
+            "(peak λ=%.1f at morning rush)",
             time_steps,
             len(h3_hexes),
             total,
+            peak_lambda,
         )
         return df
 
@@ -329,6 +394,105 @@ class DataPipeline:
 # ========================================================================== #
 #  __main__                                                                   #
 # ========================================================================== #
+def plot_demand_curve(pipeline: "DataPipeline") -> Path:
+    """Generate a publication-quality line chart of total system demand
+    over 24 h, highlighting the two rush-hour peaks.
+
+    Returns the path to the saved PNG.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    demand_matrix = pipeline.demand.values  # (T, H)
+    total_demand = demand_matrix.sum(axis=1)  # (T,)
+    time_steps = len(total_demand)
+
+    tide = pipeline.demand_gen.tidal_multiplier(time_steps)
+    base_total = sum(
+        pipeline.demand_gen.cfg.lambda_hotspot
+        if h in set(pipeline.demand_gen._rng.permutation(
+            pipeline.h3_mapping.active_hexes
+        ).tolist()[:max(1, int(len(pipeline.h3_mapping.active_hexes)
+                                * pipeline.demand_gen.cfg.hotspot_fraction))])
+        else pipeline.demand_gen.cfg.lambda_normal
+        for h in pipeline.h3_mapping.active_hexes
+    )
+
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman"],
+        "font.size": 11,
+        "axes.titlesize": 14,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "figure.dpi": 300,
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "axes.grid": True,
+        "grid.alpha": 0.3,
+    })
+
+    fig, ax1 = plt.subplots(figsize=(9, 4.5))
+
+    ax1.plot(
+        np.arange(time_steps), total_demand,
+        color="#2176AE", linewidth=0.8, alpha=0.35, label="Raw demand",
+    )
+
+    window = 12
+    smoothed = pd.Series(total_demand).rolling(
+        window=window, min_periods=1, center=True
+    ).mean()
+    ax1.plot(
+        np.arange(time_steps), smoothed,
+        color="#2176AE", linewidth=2.0, label="Smoothed (1-hour MA)",
+    )
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        np.arange(time_steps), tide,
+        color="#E8503A", linewidth=1.5, linestyle="--", alpha=0.7,
+        label="Tidal multiplier",
+    )
+    ax2.set_ylabel("Tidal Multiplier", color="#E8503A")
+    ax2.tick_params(axis="y", labelcolor="#E8503A")
+
+    cfg = pipeline.demand_gen.cfg
+    for centre, lbl in [(cfg.am_centre, "08:00\nAM Rush"),
+                        (cfg.pm_centre, "18:00\nPM Rush")]:
+        ax1.axvline(centre, color="#555555", linestyle=":", linewidth=0.9)
+        ax1.annotate(
+            lbl, xy=(centre, smoothed.iloc[int(centre)]),
+            xytext=(centre + 8, smoothed.iloc[int(centre)] * 1.08),
+            fontsize=9, fontweight="bold", color="#333333",
+            arrowprops=dict(arrowstyle="->", color="#555555", lw=0.8),
+        )
+
+    hours = np.arange(0, 289, 24)
+    ax1.set_xticks(hours)
+    ax1.set_xticklabels([f"{int(h * 5 / 60):02d}:00" for h in hours], rotation=45)
+    ax1.set_xlabel("Time of Day")
+    ax1.set_ylabel("Total System Demand (requests / 5 min)")
+    ax1.set_title("Tidal Demand Profile — Singapore Downtown Core (24 h)")
+    ax1.set_xlim(0, time_steps - 1)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(
+        lines1 + lines2, labels1 + labels2,
+        loc="upper left", frameon=True, fancybox=False, edgecolor="black",
+    )
+
+    out = Path("figures") / "demand_curve.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out)
+    plt.close(fig)
+    logger.info("Saved demand curve to %s", out)
+    return out
+
+
 if __name__ == "__main__":
     pipeline = DataPipeline(
         place="Downtown Core, Singapore",
@@ -343,3 +507,4 @@ if __name__ == "__main__":
 
     pipeline.run(time_steps=288)
     pipeline.summary()
+    plot_demand_curve(pipeline)
