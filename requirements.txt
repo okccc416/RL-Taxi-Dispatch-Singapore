@@ -1,0 +1,11 @@
+osmnx>=2.0.0
+networkx>=3.2
+h3>=4.1.0
+numpy>=1.26.0
+geopandas>=1.0.0
+pandas>=2.2.0
+ray[rllib]>=2.10.0
+gymnasium>=1.0.0
+torch>=2.0.0
+kafka-python-ng>=2.2.0
+websockets>=13.0
