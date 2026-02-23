@@ -21,7 +21,7 @@ function StatCard({
       <span className="text-[10px] uppercase tracking-widest text-gray-400">
         {label}
       </span>
-      <span className={`text-2xl font-bold tabular-nums ${accent}`}>
+      <span className={`text-xl font-bold tabular-nums ${accent}`}>
         {value}
       </span>
     </div>
@@ -33,7 +33,7 @@ export default function MetricsPanel({
   connected,
 }: MetricsPanelProps) {
   return (
-    <div className="pointer-events-auto flex items-center gap-8 rounded-xl border border-white/10 bg-gray-950/80 px-6 py-4 shadow-2xl backdrop-blur-lg">
+    <div className="pointer-events-auto flex items-center gap-5 rounded-xl border border-white/10 bg-gray-950/80 px-5 py-3 shadow-2xl backdrop-blur-lg">
       {/* connection indicator */}
       <div className="flex items-center gap-2">
         <span
@@ -67,9 +67,17 @@ export default function MetricsPanel({
       <div className="h-8 w-px bg-white/10" />
 
       <StatCard
-        label="Total Dispatches"
+        label="Dispatches"
         value={metrics.totalDispatches.toLocaleString()}
         accent="text-amber-400"
+      />
+
+      <div className="h-8 w-px bg-white/10" />
+
+      <StatCard
+        label="Utilisation"
+        value={`${(metrics.fleetUtilisation * 100).toFixed(0)}%`}
+        accent="text-rose-400"
       />
     </div>
   );

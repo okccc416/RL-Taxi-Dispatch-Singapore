@@ -528,12 +528,17 @@ def plot_spatial_ablation(snap_df: pd.DataFrame) -> Path:
 
     vmax = max(snap_df["supply"].max(), 1)
 
+    # Scale marker size so 500-taxi plots don't overflow
+    size_mult = 70 if NUM_TAXIS <= 50 else 8
+    size_base = 50 if NUM_TAXIS <= 50 else 10
+    anno_thresh = 0 if NUM_TAXIS <= 50 else 2
+
     for ax, algo in zip(axes, HEATMAP_ALGOS):
         sub = snap_df[snap_df["algorithm"] == algo].copy()
         sc = ax.scatter(
             sub["lng"], sub["lat"],
             c=sub["supply"],
-            s=sub["supply"] * 70 + 50,
+            s=sub["supply"] * size_mult + size_base,
             cmap="YlOrRd",
             vmin=0, vmax=vmax,
             edgecolors="black", linewidths=0.5, alpha=0.85,
@@ -550,7 +555,7 @@ def plot_spatial_ablation(snap_df: pd.DataFrame) -> Path:
             ax.set_ylabel("Latitude")
 
         for _, row in sub.iterrows():
-            if row["supply"] > 0:
+            if row["supply"] > anno_thresh:
                 ax.annotate(
                     str(int(row["supply"])),
                     (row["lng"], row["lat"]),
@@ -630,10 +635,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Multi-seed academic evaluation with ablation study"
     )
-    p.add_argument("--ckpt-ours", type=str, default="checkpoints_ours",
-                   help="Path to PPO-Ours checkpoint dir")
-    p.add_argument("--ckpt-ablation", type=str, default="checkpoints_ablation",
-                   help="Path to PPO-Ablation checkpoint dir")
+    p.add_argument("--num-taxis", type=int, default=20,
+                   help="Fleet size (default: 20). Dirs auto-suffixed for non-20 values.")
+    p.add_argument("--ckpt-ours", type=str, default=None,
+                   help="Path to PPO-Ours checkpoint dir (auto-resolved if omitted)")
+    p.add_argument("--ckpt-ablation", type=str, default=None,
+                   help="Path to PPO-Ablation checkpoint dir (auto-resolved if omitted)")
     p.add_argument("--plot-only", action="store_true",
                    help="Skip simulation, re-plot from saved CSVs")
     return p.parse_args()
@@ -642,8 +649,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    # ── Dynamic dirs based on fleet size ──────────────────────────────
+    global FIG_DIR, CSV_DIR, NUM_TAXIS
+    NUM_TAXIS = args.num_taxis
+    suffix = f"_{NUM_TAXIS}" if NUM_TAXIS != 20 else ""
+    FIG_DIR = Path(f"figures{suffix}")
+    CSV_DIR = Path(f"results{suffix}")
+
+    # ── Auto-resolve checkpoint paths if not explicitly provided ──────
+    ckpt_ours = args.ckpt_ours or f"checkpoints_ours{suffix}"
+    ckpt_ablation = args.ckpt_ablation or f"checkpoints_ablation{suffix}"
+
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     CSV_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger.info(
+        "Fleet=%d  figures→%s  results→%s  ckpt_ours→%s  ckpt_ablation→%s",
+        NUM_TAXIS, FIG_DIR, CSV_DIR, ckpt_ours, ckpt_ablation,
+    )
 
     results_csv = CSV_DIR / "eval_multiseed_results.csv"
     snap_csv = CSV_DIR / "spatial_snapshot_ablation.csv"
@@ -665,13 +688,13 @@ def main() -> None:
         dispatchers: List[BaseDispatcher] = [
             PPODispatcher(
                 masker, NUM_TAXIS,
-                checkpoint_path=args.ckpt_ours,
+                checkpoint_path=ckpt_ours,
                 density_alpha=0.5,
                 label="PPO-Ours",
             ),
             PPODispatcher(
                 masker, NUM_TAXIS,
-                checkpoint_path=args.ckpt_ablation,
+                checkpoint_path=ckpt_ablation,
                 density_alpha=0.0,
                 label="PPO-Ablation",
             ),

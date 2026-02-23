@@ -39,16 +39,21 @@ export default function DispatchTerminal({ log }: DispatchTerminalProps) {
           </p>
         )}
         {log.map((cmd, i) => (
-          <div key={`${cmd.vehicle_id}-${cmd.timestamp}-${i}`} className="flex gap-1">
+          <div key={`${cmd.vehicle_id}-${cmd.timestamp}-${i}`} className="flex items-center gap-1">
+            <span
+              className={`inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                cmd.action === 0 ? "bg-gray-500" : "bg-emerald-400"
+              }`}
+            />
             <span className="text-gray-600 select-none">
               {new Date(cmd.timestamp).toLocaleTimeString()}
             </span>
             <span className="text-sky-400">
-              Vehicle_{cmd.vehicle_id}
+              V_{cmd.vehicle_id}
             </span>
             <span className="text-gray-500">→</span>
             <span className="text-amber-300 truncate">
-              {cmd.target_h3}
+              {cmd.target_h3.slice(-6)}
             </span>
             <span
               className={

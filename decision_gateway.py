@@ -98,6 +98,7 @@ class DispatchOracle:
         h3_mapping: H3Mapping,
         demand_matrix: np.ndarray,
         checkpoint_path: str | Path | None = None,
+        num_taxis: int = 20,
     ) -> None:
         self._active_hexes = h3_mapping.active_hexes
         self._hex_to_idx: Dict[str, int] = {
@@ -109,7 +110,8 @@ class DispatchOracle:
         self._rng = np.random.default_rng(42)
 
         self._supply = np.zeros(self._num_hexes, dtype=np.float32)
-        self._vehicle_id_counter = 100
+        self._num_taxis = num_taxis
+        self._request_counter = 0
 
         self._policy = None
         if checkpoint_path and Path(checkpoint_path).exists():
@@ -126,7 +128,7 @@ class DispatchOracle:
 
             if not ray.is_initialized():
                 ray.init(ignore_reinit_error=True, logging_level=logging.ERROR)
-            self._policy = PPO.from_checkpoint(str(path))
+            self._policy = PPO.from_checkpoint(str(Path(path).resolve()))
             logger.info("Loaded RL checkpoint from %s", path)
         except Exception as exc:
             logger.warning(
@@ -158,8 +160,8 @@ class DispatchOracle:
 
         target_hex = self._masker.resolve(origin_hex, action)
 
-        self._vehicle_id_counter += 1
-        vehicle_id = self._vehicle_id_counter
+        vehicle_id = self._request_counter % self._num_taxis
+        self._request_counter += 1
 
         # Update internal supply tracker
         idx = self._hex_to_idx.get(target_hex)
@@ -167,6 +169,14 @@ class DispatchOracle:
             self._supply[idx] += 1
 
         action_labels = ["STAY"] + [f"MOVE_DIR_{i}" for i in range(1, 7)]
+
+        time_step = request.get("time_step", 0)
+        total_minutes = (time_step % 288) * 5
+        h, m = divmod(total_minutes, 60)
+        period = "AM" if h < 12 else "PM"
+        display_h = h % 12 or 12
+        sim_time = f"{display_h}:{m:02d} {period}"
+
         return {
             "vehicle_id": vehicle_id,
             "request_id": request["request_id"],
@@ -175,6 +185,8 @@ class DispatchOracle:
             "action": action,
             "action_label": action_labels[action],
             "timestamp": request.get("timestamp", datetime.now(tz=timezone.utc).isoformat()),
+            "fleet_size": self._num_taxis,
+            "sim_time": sim_time,
         }
 
     # ------------------------------------------------------------------ #
@@ -391,7 +403,8 @@ class DecisionGateway:
         consumer_task = asyncio.create_task(self._consume_and_dispatch())
 
         async with websockets.serve(
-            self._ws_handler, self._ws_host, self._ws_port
+            self._ws_handler, self._ws_host, self._ws_port,
+            reuse_address=True,
         ):
             logger.info(
                 "WebSocket server listening on ws://%s:%d",
@@ -539,13 +552,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--checkpoint",
         default=None,
-        help="Path to an RLlib PPO checkpoint directory",
+        help="Path to an RLlib PPO checkpoint directory "
+             "(e.g. checkpoints_ours_500 for the 500-taxi model)",
     )
     p.add_argument(
         "--ws-port",
         type=int,
         default=WS_PORT,
         help=f"WebSocket server port (default: {WS_PORT})",
+    )
+    p.add_argument(
+        "--num-taxis",
+        type=int,
+        default=20,
+        help="Number of taxis in the simulated fleet (default: 20)",
     )
     p.add_argument(
         "--with-test-client",
@@ -575,6 +595,7 @@ async def main() -> None:
     print(f"  Inference  : {inference}")
     print(f"  WebSocket  : ws://{WS_HOST}:{args.ws_port}")
     print(f"  Hexagons   : {len(pipeline.h3_mapping.active_hexes)}")
+    print(f"  Fleet size : {args.num_taxis} taxis")
     print("=" * 64 + "\n")
 
     # ── Build components ──────────────────────────────────────────────
@@ -582,6 +603,7 @@ async def main() -> None:
         h3_mapping=pipeline.h3_mapping,
         demand_matrix=pipeline.demand.values.astype(np.float32),
         checkpoint_path=args.checkpoint,
+        num_taxis=args.num_taxis,
     )
 
     source = RequestSource(

@@ -10,7 +10,7 @@ import type {
   TaxiState,
 } from "@/lib/types";
 
-const MAX_LOG = 200;
+const MAX_LOG = 100;
 const MAX_ARCS = 40;
 const ARC_TTL_MS = 8_000;
 const RECONNECT_MS = 3_000;
@@ -26,11 +26,15 @@ export function useDispatchStream(url: string = "ws://localhost:8765") {
     activeVehicles: 0,
     liveORR: 0,
     totalDispatches: 0,
+    fleetUtilisation: 0,
   });
   const [connected, setConnected] = useState(false);
+  const [fleetSize, setFleetSize] = useState(0);
+  const [simTime, setSimTime] = useState("");
 
   const dispatchCount = useRef(0);
   const fulfilledCount = useRef(0);
+  const recentActions = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   const processCommand = useCallback((cmd: DispatchCommand) => {
@@ -40,6 +44,14 @@ export function useDispatchStream(url: string = "ws://localhost:8765") {
 
     dispatchCount.current += 1;
     if (cmd.action !== 0) fulfilledCount.current += 1;
+
+    if (cmd.fleet_size) setFleetSize(cmd.fleet_size);
+    if (cmd.sim_time) setSimTime(cmd.sim_time);
+
+    const UTIL_WINDOW = 200;
+    recentActions.current.push(cmd.action);
+    if (recentActions.current.length > UTIL_WINDOW)
+      recentActions.current = recentActions.current.slice(-UTIL_WINDOW);
 
     // Update taxi position
     setTaxis((prev) => {
@@ -86,10 +98,13 @@ export function useDispatchStream(url: string = "ws://localhost:8765") {
 
     // Metrics
     const total = dispatchCount.current;
+    const moving = recentActions.current.filter((a) => a !== 0).length;
+    const fs = cmd.fleet_size || 1;
     setMetrics({
       activeVehicles: 0,
       liveORR: total > 0 ? fulfilledCount.current / total : 0,
       totalDispatches: total,
+      fleetUtilisation: Math.min(1, moving / fs),
     });
   }, []);
 
@@ -155,5 +170,7 @@ export function useDispatchStream(url: string = "ws://localhost:8765") {
     log,
     metrics: enrichedMetrics,
     connected,
+    fleetSize,
+    simTime,
   };
 }

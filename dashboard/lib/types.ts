@@ -7,6 +7,8 @@ export interface DispatchCommand {
   action: number;
   action_label: string;
   timestamp: string;
+  fleet_size?: number;
+  sim_time?: string;
 }
 
 /** Internal taxi state for map rendering */
@@ -26,6 +28,7 @@ export interface Metrics {
   activeVehicles: number;
   liveORR: number;
   totalDispatches: number;
+  fleetUtilisation: number;
 }
 
 /** Hex demand state for the H3 layer */

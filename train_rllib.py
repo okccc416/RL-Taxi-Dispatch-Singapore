@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import warnings
 from dataclasses import dataclass
@@ -242,8 +243,14 @@ class TaxiDispatchMultiAgentEnv(MultiAgentEnv):
         }
         self._num_hexes: int = len(self._active_hexes)
         self._masker = ActionMasker(self._active_hexes)
+
+        # Scale demand proportionally to fleet size so that the
+        # supply/demand ratio stays consistent across fleet scales.
+        # Baseline: 20 taxis.  E.g. 500 taxis → demand × 25.
+        _baseline_taxis = 20
+        demand_scale = max(1.0, self.num_taxis / _baseline_taxis)
         self._demand_matrix: np.ndarray = (
-            pipeline.demand.values.astype(np.float32)
+            pipeline.demand.values.astype(np.float32) * demand_scale
         )
         self._graph = pipeline.graph
 
@@ -514,8 +521,8 @@ ENV_NAME = "TaxiDispatch-v0"
 def build_ppo_config(
     num_taxis: int = 20,
     num_workers: int = 2,
-    train_batch_size: int = 4000,
-    minibatch_size: int = 256,
+    train_batch_size: int | None = None,
+    minibatch_size: int | None = None,
     lr: float = 3e-4,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
@@ -529,9 +536,44 @@ def build_ppo_config(
 
     All N taxi agents are mapped to the **same** ``"shared_policy"``
     via ``policy_mapping_fn``, achieving full parameter sharing (CTDE).
+
+    For large fleets (>50 taxis) the sampling parameters are automatically
+    scaled so that rollout workers can complete fragments within the
+    per-iteration timeout.
     """
     env_config = env_config or {}
     env_config.setdefault("num_taxis", num_taxis)
+
+    # ── Auto-scale hyperparameters for large fleets ────────────────────
+    # RLlib counts `train_batch_size` in **env steps**, but each env step
+    # produces `num_taxis` agent transitions.  With 500 taxis a batch of
+    # 4000 env steps → 2 M agent transitions, making SGD extremely slow.
+    # We keep env-step batches modest and set minibatch_size = batch so
+    # each epoch does ~(batch × num_agents / minibatch) SGD updates.
+    # Note: RLlib requires minibatch_size <= train_batch_size.
+    large_fleet = num_taxis > 50
+    if train_batch_size is None:
+        train_batch_size = 2_000 if large_fleet else 4_000
+    if minibatch_size is None:
+        minibatch_size = min(2_000, train_batch_size) if large_fleet else 256
+
+    # Workers with many agents need much longer to complete fragments.
+    # rollout_fragment_length = small value so workers return quickly.
+    # sample_timeout_s = generous timeout so heavy envs don't starve.
+    if large_fleet:
+        fragment_length = 50
+        sample_timeout = 600.0
+        logger.info(
+            "Large fleet (%d taxis): fragment_length=%d, "
+            "sample_timeout=%.0fs, batch=%d env-steps "
+            "(≈%dk agent transitions), minibatch=%d",
+            num_taxis, fragment_length, sample_timeout,
+            train_batch_size, train_batch_size * num_taxis // 1000,
+            minibatch_size,
+        )
+    else:
+        fragment_length = "auto"
+        sample_timeout = 60.0
 
     config = (
         PPOConfig()
@@ -572,6 +614,8 @@ def build_ppo_config(
         )
         .env_runners(
             num_env_runners=num_workers,
+            rollout_fragment_length=fragment_length,
+            sample_timeout_s=sample_timeout,
         )
         .resources(
             num_gpus=int(torch.cuda.is_available()),
@@ -590,6 +634,7 @@ def train(
     checkpoint_freq: int = 10,
     checkpoint_dir: str = "checkpoints_ours",
     density_alpha: float = 0.5,
+    smoke_test: bool = False,
 ) -> None:
     """Initialise Ray, build the PPO algorithm, and run the training loop.
 
@@ -601,15 +646,24 @@ def train(
     checkpoint_dir : str
         Directory for saving checkpoints.  ``"checkpoints_ours"`` for
         the full model, ``"checkpoints_ablation"`` for the ablation.
+    smoke_test : bool
+        If True, forces a small ``train_batch_size`` to speed up
+        the pipeline validation (especially for large fleets).
     """
     # ── Register custom env + model ───────────────────────────────────
     register_env(ENV_NAME, lambda cfg: TaxiDispatchMultiAgentEnv(cfg))
     ModelCatalog.register_custom_model("action_mask_model", ActionMaskModel)
 
     # ── Build config ──────────────────────────────────────────────────
+    # For smoke test with large fleets, use a tiny batch so it finishes fast
+    batch_override = 200 if (smoke_test and num_taxis > 50) else None
+    mini_override = 200 if batch_override else None
+
     ppo_config = build_ppo_config(
         num_taxis=num_taxis,
         num_workers=num_workers,
+        train_batch_size=batch_override,
+        minibatch_size=mini_override,
         env_config={
             "num_taxis": num_taxis,
             "max_steps": 288,
@@ -650,15 +704,21 @@ def train(
         ep_len_mean = result["env_runners"]["episode_len_mean"]
         timesteps = result["num_env_steps_sampled_lifetime"]
 
+        # NaN means no episode completed this iteration — skip reward tracking
+        reward_valid = isinstance(ep_reward_mean, (int, float)) and not math.isnan(ep_reward_mean)
+
         improved = ""
-        if ep_reward_mean > best_reward:
+        if reward_valid and ep_reward_mean > best_reward:
             best_reward = ep_reward_mean
             improved = " ★"
 
+        reward_str = f"{ep_reward_mean:+10.2f}" if reward_valid else "    (wait)"
+        len_str = f"{ep_len_mean:6.1f}" if reward_valid else " (wait)"
+
         print(
             f"  [{i:>4}/{iterations}]  "
-            f"reward={ep_reward_mean:+10.2f}  "
-            f"ep_len={ep_len_mean:6.1f}  "
+            f"reward={reward_str}  "
+            f"ep_len={len_str}  "
             f"timesteps={timesteps:>9,}{improved}"
         )
 
@@ -668,7 +728,11 @@ def train(
 
     # ── Cleanup ───────────────────────────────────────────────────────
     algo.stop()
-    print(f"\n  Training complete.  Best mean reward: {best_reward:+.2f}")
+    if best_reward == float("-inf"):
+        print("\n  Training complete.  WARNING: No episodes completed — reward never recorded.")
+        print("  The checkpoint contains a randomly-initialised policy.")
+    else:
+        print(f"\n  Training complete.  Best mean reward: {best_reward:+.2f}")
     print(f"  Checkpoints saved to: {ckpt_path.resolve()}\n")
 
 
@@ -720,13 +784,16 @@ if __name__ == "__main__":
         logging_level=logging.WARNING,
     )
 
+    n = args.num_taxis
+    suffix = f"_{n}" if n != 20 else ""
+
     if args.ablation:
         density_alpha = 0.0
-        checkpoint_dir = "checkpoints_ablation"
+        checkpoint_dir = f"checkpoints_ablation{suffix}"
         logger.info("ABLATION mode: density_alpha=0.0, saving to %s", checkpoint_dir)
     else:
         density_alpha = 0.5
-        checkpoint_dir = "checkpoints_ours"
+        checkpoint_dir = f"checkpoints_ours{suffix}"
         logger.info("FULL MODEL mode: density_alpha=0.5, saving to %s", checkpoint_dir)
 
     try:
@@ -737,6 +804,7 @@ if __name__ == "__main__":
             checkpoint_freq=args.checkpoint_freq,
             checkpoint_dir=checkpoint_dir,
             density_alpha=density_alpha,
+            smoke_test=args.smoke_test,
         )
     finally:
         ray.shutdown()

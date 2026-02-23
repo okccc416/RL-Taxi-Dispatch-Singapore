@@ -437,7 +437,13 @@ class H3CityFlowEnv(gym.Env):
         self._hex_to_nodes: Dict[str, List[int]] = h3_mapping.hex_to_nodes
 
         # --- Demand matrix (T × H) -----------------------------------------
-        self._demand_matrix: np.ndarray = demand_df.values.astype(np.float32)
+        # Scale demand proportionally so supply/demand ratio stays consistent
+        # across fleet sizes.  Baseline: 20 taxis.
+        _baseline_taxis = 20
+        demand_scale = max(1.0, self.cfg.num_taxis / _baseline_taxis)
+        self._demand_matrix: np.ndarray = (
+            demand_df.values.astype(np.float32) * demand_scale
+        )
 
         # --- Road graph (fallback travel-time estimation) -------------------
         self._graph: nx.MultiDiGraph = graph

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Map from "react-map-gl/maplibre";
 import { H3HexagonLayer } from "@deck.gl/geo-layers";
 import { ArcLayer, ScatterplotLayer } from "@deck.gl/layers";
@@ -16,10 +16,11 @@ const INITIAL_VIEW = {
   bearing: -20,
 };
 
-const MAP_STYLE =
-  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const MAP_STYLES = [
+  "https://tiles.openfreemap.org/styles/dark",
+  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+];
 
-// Colour ramp: dark blue → cyan → yellow → orange (dispatch intensity)
 function heatColor(t: number): [number, number, number, number] {
   if (t < 0.33) {
     const s = t / 0.33;
@@ -56,6 +57,7 @@ interface MapViewProps {
 
 export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
   const [DeckGL, setDeckGL] = useState<any>(null);
+  const pulseRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     (async () => {
@@ -67,6 +69,20 @@ export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
     })();
   }, []);
 
+  // Track recently-dispatched hexes for pulse effect
+  useEffect(() => {
+    const newHexes = arcs.map((a) => {
+      const lng = a.targetPosition[0];
+      const lat = a.targetPosition[1];
+      return `${lng.toFixed(4)},${lat.toFixed(4)}`;
+    });
+    newHexes.forEach((h) => pulseRef.current.add(h));
+    const timer = setTimeout(() => {
+      newHexes.forEach((h) => pulseRef.current.delete(h));
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [arcs]);
+
   const maxCount = useMemo(
     () => Math.max(1, ...hexData.map((h) => h.dispatchCount)),
     [hexData]
@@ -74,7 +90,6 @@ export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
 
   const now = Date.now();
 
-  // ── Layer 1: H3 hex zones (flat, colour-coded by intensity) ──────
   const hexLayer = new H3HexagonLayer<HexDemandState>({
     id: "h3-zones",
     data: hexData,
@@ -85,11 +100,13 @@ export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
     lineWidthMinPixels: 1,
     getHexagon: (d: HexDemandState) => d.h3Index,
     getFillColor: (d: HexDemandState) => heatColor(d.dispatchCount / maxCount),
-    getLineColor: [255, 255, 255, 50],
-    updateTriggers: { getFillColor: [maxCount] },
+    getLineColor: (d: HexDemandState) => {
+      const recent = pulseRef.current.size > 0;
+      return recent ? [255, 255, 255, 100] : [255, 255, 255, 50];
+    },
+    updateTriggers: { getFillColor: [maxCount], getLineColor: [arcs.length] },
   });
 
-  // ── Layer 2: Dispatch arcs (cyan trails fading with age) ─────────
   const arcLayer = new ArcLayer<ArcData>({
     id: "dispatch-arcs",
     data: arcs,
@@ -98,46 +115,47 @@ export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
     getTargetPosition: (d: ArcData) => d.targetPosition,
     getSourceColor: [0, 255, 200, 220],
     getTargetColor: [0, 180, 255, 80],
-    getWidth: 2.5,
+    getWidth: 3.5,
     greatCircle: false,
     updateTriggers: { getSourcePosition: [arcs.length] },
   });
 
-  // ── Layer 3: Taxi positions (large glowing dots) ─────────────────
-  // Outer glow ring
+  const isLargeFleet = taxis.length > 80;
+
   const taxiGlowLayer = new ScatterplotLayer<TaxiState>({
     id: "taxi-glow",
     data: taxis,
     pickable: false,
     filled: true,
     stroked: false,
-    radiusMinPixels: 12,
-    radiusMaxPixels: 24,
+    radiusMinPixels: isLargeFleet ? 4 : 12,
+    radiusMaxPixels: isLargeFleet ? 10 : 24,
     getPosition: (d: TaxiState) => [d.targetLng, d.targetLat],
     getFillColor: (d: TaxiState) =>
       d.actionLabel === "STAY"
         ? [120, 120, 120, 50]
         : [0, 255, 180, 70],
-    getRadius: 60,
+    getRadius: isLargeFleet ? 25 : 60,
+    transitions: { getPosition: { duration: 600, easing: (t: number) => t * (2 - t) } },
   });
 
-  // Inner solid dot
   const taxiLayer = new ScatterplotLayer<TaxiState>({
     id: "taxis",
     data: taxis,
     pickable: true,
     filled: true,
     stroked: true,
-    radiusMinPixels: 6,
-    radiusMaxPixels: 14,
-    lineWidthMinPixels: 1.5,
+    radiusMinPixels: isLargeFleet ? 2 : 6,
+    radiusMaxPixels: isLargeFleet ? 6 : 14,
+    lineWidthMinPixels: isLargeFleet ? 0.8 : 1.5,
     getPosition: (d: TaxiState) => [d.targetLng, d.targetLat],
     getFillColor: (d: TaxiState) =>
       d.actionLabel === "STAY"
         ? [160, 160, 160, 240]
         : [0, 255, 180, 255],
     getLineColor: [255, 255, 255, 180],
-    getRadius: 35,
+    getRadius: isLargeFleet ? 15 : 35,
+    transitions: { getPosition: { duration: 600, easing: (t: number) => t * (2 - t) } },
   });
 
   const getTooltip = useCallback(
@@ -177,7 +195,12 @@ export default function MapView({ taxis, hexData, arcs }: MapViewProps) {
       getTooltip={getTooltip}
       style={{ position: "absolute", inset: "0" }}
     >
-      <Map reuseMaps mapStyle={MAP_STYLE} />
+      <Map
+        mapStyle={MAP_STYLES[0]}
+        onError={() => {
+          /* fallback handled by mapStyle */
+        }}
+      />
     </DeckGL>
   );
 }

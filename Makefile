@@ -16,7 +16,8 @@ NUM_TAXIS   ?= 20
 NUM_WORKERS ?= 2
 CKPT_FREQ   ?= 10
 
-.PHONY: all data train train-ours train-ablation evaluate dashboard clean
+.PHONY: all data train train-ours train-ablation evaluate dashboard clean \
+       train-500 evaluate-500 scale-test
 
 # ── Full pipeline ──────────────────────────────────────────────────────────
 all: data train evaluate
@@ -73,9 +74,40 @@ stream:
 	@echo "Starting Decision Gateway on ws://localhost:8765 ..."
 	$(PYTHON) decision_gateway.py --standalone --with-test-client
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 500-TAXI INDUSTRIAL SCALE TEST  (outputs to *_500/ dirs, non-destructive)
+# ═══════════════════════════════════════════════════════════════════════════
+train-500:
+	@echo "════════════════════════════════════════════════════════"
+	@echo "  SCALE — Train PPO-Ours (500 taxis)"
+	@echo "════════════════════════════════════════════════════════"
+	$(PYTHON) train_rllib.py \
+		--iterations $(ITERATIONS) \
+		--num-taxis 500 \
+		--num-workers $(NUM_WORKERS) \
+		--checkpoint-freq $(CKPT_FREQ)
+	@echo "════════════════════════════════════════════════════════"
+	@echo "  SCALE — Train PPO-Ablation (500 taxis)"
+	@echo "════════════════════════════════════════════════════════"
+	$(PYTHON) train_rllib.py \
+		--iterations $(ITERATIONS) \
+		--num-taxis 500 \
+		--num-workers $(NUM_WORKERS) \
+		--checkpoint-freq $(CKPT_FREQ) \
+		--ablation
+
+evaluate-500:
+	@echo "════════════════════════════════════════════════════════"
+	@echo "  SCALE — Evaluate (500 taxis)"
+	@echo "════════════════════════════════════════════════════════"
+	$(PYTHON) evaluate_and_plot.py --num-taxis 500
+
+scale-test: train-500 evaluate-500
+
 # ── Cleanup ───────────────────────────────────────────────────────────────
 clean:
 	rm -rf checkpoints_ours checkpoints_ablation
-	rm -rf results figures
+	rm -rf checkpoints_ours_* checkpoints_ablation_*
+	rm -rf results results_* figures figures_*
 	rm -rf __pycache__ .rllib_*
 	rm -rf dashboard/.next dashboard/node_modules
