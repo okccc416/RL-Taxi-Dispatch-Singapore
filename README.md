@@ -145,6 +145,7 @@ Demand follows a bi-modal Gaussian tidal curve with peaks at 08:00 (AM rush) and
 λ(t, h) = λ_base(h) × [ 0.15 + 2.8·𝒩(96, 22²) + 2.3·𝒩(216, 22²) + 0.7·𝒩(156, 36²) ]
 ```
 
+
 ---
 
 ## Tech Stack
@@ -159,6 +160,3 @@ Demand follows a bi-modal Gaussian tidal curve with peaks at 08:00 (AM rush) and
 
 ---
 
-## License
-
-This project is part of an academic dissertation at NTU. All rights reserved.
